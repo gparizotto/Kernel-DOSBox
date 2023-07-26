@@ -1,0 +1,92 @@
+#include <nucleo.h>
+#include <stdio.h>
+#define maximo_item 100
+#define maximo_repeticoes 100
+
+semaforo mutex;
+semaforo vazio;
+semaforo cheio;
+
+FILE *arquivo;
+
+int proximo_item = 0, proximo_consome = 0;
+char buffer[maximo_item];
+int aux = 0;
+
+int far produz_item()
+{
+    aux += 2;
+    return aux;
+}
+
+void far insere_item(int item)
+{
+    buffer[proximo_item] = item;
+
+    fprintf(arquivo, "O produtor criou o irem %d [%d]\n", item, proximo_item);
+    proximo_item++;
+
+    if(proximo_item == maximo_item) proximo_item = 0;
+}
+
+void far remove_item()
+{
+    int item = buffer[proximo_consome];
+
+    fprintf(arquivo, "O consumidor consumiu o item %d [%d]\n", item, proximo_consome);
+
+    proximo_consome++;
+
+    if(proximo_consome == maximo_item) proximo_consome = 0;
+}
+
+void far produtor()
+{
+    int i = maximo_repeticoes;
+    int item;
+
+    while(i--)
+    {
+        printf("passou produt");
+        item = produz_item();
+
+        P(&vazio);
+        P(&cheio);
+        insere_item(item);
+        V(&mutex);
+        V(&cheio);
+    }
+
+    termina_processo();
+}
+
+void far consumidor()
+{
+    int i = maximo_repeticoes;
+
+    while(i--)
+    {
+        P(&cheio);
+        P(&mutex);
+        remove_item();
+        V(&mutex);
+        V(&vazio);
+    }
+
+    termina_processo();
+}
+
+main()
+{
+   arquivo = fopen("TSEMAFOR.txt", "w");
+   if(!arquivo) return;
+
+   inicia_semaforo(&mutex, 1);
+   inicia_semaforo(&vazio, maximo_item);
+   inicia_semaforo(&cheio, 0);
+
+   cria_processo(produtor, "produtor");
+   cria_processo(consumidor, "consumidor");
+
+   dispara_sistema();
+}

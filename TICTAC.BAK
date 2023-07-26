@@ -1,0 +1,34 @@
+#INCLUDE <STDIO.H>
+#INCLUDE <SYSTEM.H>
+
+PTR_DESC DTIC, DTAC, DMAIN;
+
+VOID FAR TIC()
+{
+   WHILE(1)
+   {
+      PRINTF("TIC-");
+      TRANSFER(DTIC, DTAC);
+   }
+}
+
+VOID FAR TAC()
+{
+   WHILE(1)
+   {
+      PRINTF("TAC-");
+      TRANSFER(DTAC, DTIC);
+   }
+}
+
+VOID MAIN()
+{
+   DTIC = CRIA_DESC();
+   DTAC = CRIA_DESC();
+   DMAIN = CRIA_DESC();
+
+   NEWPROCESS(TIC, DTIC);
+   NEWPROCESS(TAC, DTAC);
+
+   TRANSFER(DMAIN, DTIC);
+}

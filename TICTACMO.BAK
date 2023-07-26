@@ -1,0 +1,34 @@
+#include <system.h>
+#include <stdio.h>
+
+PTR_DESC ponteiro_main, ponteiro_tic, ponteiro_tac;
+int count = 0;
+
+void far tic(){
+     int i = 0;
+     while(count < 100){
+       printf("tic-");
+       transfer(ponteiro_tic, ponteiro_tac);
+     }
+     transfer(ponteiro_tic, ponteiro_main);
+}
+
+void far tac(){
+     while(1){
+       printf("tac-");
+       count++;
+       transfer(ponteiro_tac, ponteiro_tic);
+     }
+}
+
+main(){
+    ponteiro_main = cria_desc();
+    ponteiro_tic = cria_desc();
+    ponteiro_tac = cria_desc();
+
+    newprocess(tic, ponteiro_tic);
+    newprocess(tac, ponteiro_tac);
+
+    transfer(ponteiro_main, ponteiro_tic);
+
+}

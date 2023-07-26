@@ -1,0 +1,243 @@
+#include <system.h>
+
+#define MAX_PROCESS_NAME 20
+#define INTERRUPT_BIT 8
+
+/* Estrutura para os registradores */
+typedef struct reg_8086
+{
+    unsigned bx1, es1;
+} REG_8086;
+
+/* Estrutura de dados no núcleo do sistema operacional que armazena as informações de um processo (BCP) */
+typedef struct bcp
+{
+    char name[MAX_PROCESS_NAME];
+    enum
+    {
+        ativado,
+        bloqueado,
+        finalizado
+    } estado;
+    PTR_DESC contexto;
+    struct bcp *fila_semaforo;
+    struct bcp *proximo_bcp;
+} BCP;
+
+typedef BCP *PTR_BCP; /* ponteiro para o BCP (alocação dinâmica) */
+
+/* Estrutura para o semáforo que contém o valor do semáforo e a fila de processos */
+typedef struct
+{
+    int valor;
+    PTR_BCP fila_bloqueados;
+} SEMAFORO;
+
+/* Cabeça da fila de processos e contexto do escalonador de processos */
+PTR_BCP cabeca_fila_processos;
+PTR_DESC contexto_escalador;
+
+/* Estrutura para a "região crítica" contendo os resultados dos registradores e ponteiro da flag do DOS */
+typedef union regiao_critica
+{
+    REG_8086 reg;
+    char far *valor_reg;
+} PTR_RC;
+
+PTR_RC regiaoCriticaDOS;
+
+/* Função que desabilita as interrupções e retorna o estado da interrupção para o padrão e no fim retorna o controle para o DOS */
+void far voltarAoDOS()
+{
+    disable();
+    setvect(INTERRUPT_BIT, p_est->int_anterior);
+    enable();
+    exit(0);
+}
+
+void far iniciarFilaProcessos()
+{
+    cabeca_fila_processos = NULL;
+}
+
+/* Aloca o BCP do processo e o insere no fim da fila de processos */
+void far criarProcesso(void far (*endereco_processo)(), char nome_processo[MAX_PROCESS_NAME])
+{
+
+    PTR_BCP alocar_processo = (PTR_BCP)malloc(sizeof(struct bcp));
+    strcpy(alocar_processo->nome, nome_processo);
+    alocar_processo->estado = ativado;
+    alocar_processo->contexto = cria_desc();
+    novo_processo(endereco_processo, alocar_processo->contexto);
+    alocar_processo->fila_semaforo = NULL;
+    alocar_processo->proximo_bcp = NULL;
+
+    if (cabeca_fila_processos == NULL) /* Se a fila estiver vazia, insere no início (cabeça da fila) */
+    {
+        alocar_processo->proximo_bcp = alocar_processo;
+        cabeca_fila_processos = alocar_processo;
+    }
+    else /* Caso contrário, insere no fim da fila */
+    {
+        PTR_BCP aux = cabeca_fila_processos;
+
+        while (aux->proximo_bcp != cabeca_fila_processos)
+        {
+            aux = aux->proximo_bcp;
+        }
+
+        aux->proximo_bcp = alocar_processo;
+        alocar_processo->proximo_bcp = cabeca_fila_processos;
+    }
+}
+
+/* Função para marcar o processo como finalizado ("finalizado") */
+/* Como discutido em aula, caso haja tempo restante na fatia, ele deve ser gasto usando o while(1) */
+void far finalizarProcesso()
+{
+    disable();
+    cabeca_fila_processos->estado = finalizado;
+    enable();
+    while (1)
+        ;
+}
+
+/* Função para percorrer a fila de processos ativos e obter o próximo (endereço do descritor) */
+/* Caso não haja processos ativos, retorna NULL */
+PTR_BCP obterProximoProcessoAtivo()
+{
+    PTR_BCP prox_ativado = cabeca_fila_processos->proximo_bcp;
+    while (prox_ativado != cabeca_fila_processos)
+    {
+        if (prox_ativado->estado == ativado)
+        {
+            return prox_ativado;
+        }
+        prox_ativado = prox_ativado->proximo_bcp;
+    }
+    return NULL;
+}
+
+/* Escalonador, onde indica a origem (contexto) e indica o destino (próximo processo) */
+void far escalonador()
+{
+    p_est->p_origem = contexto_escalador;
+    p_est->p_destino = cabeca_fila_processos->contexto;
+    p_est->num_vetor = INTERRUPT_BIT;
+
+    _AH = 0x34; /* AH com a flag da pilha de serviços do DOS */
+    _AL = 0x00;
+
+    geninterrupt(0x21); /* Inicia uma interrupção ao endereço */
+
+    /* Salva os valores nos registradores da região crítica */
+    regiaoCriticaDOS.reg.bx1 = _BX;
+    regiaoCriticaDOS.reg.es1 = _ES;
+
+    /* Realiza a troca de processos */
+    while (1)
+    {
+        iotransfer();
+        disable();
+
+        if (!(*regiaoCriticaDOS.valor_reg))
+        {
+            if ((cabeca_fila_processos = obterProximoProcessoAtivo()) == NULL)
+            {
+                voltarAoDOS();
+            }
+
+            p_est->p_destino = cabeca_fila_processos->contexto;
+        }
+
+        enable();
+    }
+}
+
+/* Cria os descritores e transfere o controle atual para o escalonador de processos (escalonador) */
+/* Função dispara_sistema, dos slides */
+void far escalonadorAtivo()
+{
+    PTR_DESC aux_ativo = cria_desc();
+    contexto_escalador = cria_desc();
+
+    novo_processo(escalonador, contexto_escalador);
+
+    transferir(aux_ativo, contexto_escalador);
+}
+
+void far initSemaforo(SEMAFORO *semaforo_usuario, int tamanho_semaforo)
+{
+    semaforo_usuario->valor = tamanho_semaforo;
+    semaforo_usuario->fila_bloqueados = NULL;
+}
+
+/* Se semaforo_usuario > 0, decrementa e o processo continua, caso contrário, bloqueia o processo e coloca na fila de bloqueados */
+void far downSemaforo(SEMAFORO *semaforo_usuario)
+{
+    disable();
+
+    if (semaforo_usuario->valor > 0)
+    {
+        semaforo_usuario->valor--;
+    }
+    else
+    {
+        PTR_BCP p_aux;
+
+        cabeca_fila_processos->estado = bloqueado;
+
+        /* Se a fila de bloqueados estiver vazia, insere */
+        if (semaforo_usuario->fila_bloqueados == NULL)
+        {
+            semaforo_usuario->fila_bloqueados = cabeca_fila_processos;
+        }
+        else /* Caso contrário, percorre a fila de bloqueados para inserir no fim */
+        {
+            PTR_BCP aux;
+            aux = semaforo_usuario->fila_bloqueados;
+
+            while (aux->fila_semaforo != NULL)
+            {
+                aux = aux->fila_semaforo;
+            }
+
+            aux->fila_semaforo = cabeca_fila_processos;
+        }
+
+        cabeca_fila_processos->fila_semaforo = NULL;
+        p_aux = cabeca_fila_processos;
+
+        if ((cabeca_fila_processos = obterProximoProcessoAtivo()) == NULL)
+        {
+            voltarAoDOS();
+        }
+
+        transferir(p_aux->contexto, cabeca_fila_processos->contexto);
+    }
+
+    enable();
+}
+
+/* Se a fila de bloqueados estiver vazia, incrementa, caso contrário, ativa o processo da fila de bloqueados */
+void far upSemaforo(SEMAFORO *semaforo_usuario)
+{
+    disable();
+
+    if (semaforo_usuario->fila_bloqueados == NULL)
+    {
+        semaforo_usuario->valor++;
+    }
+    else
+    {
+        PTR_BCP p_prox;
+
+        p_prox = semaforo_usuario->fila_bloqueados;
+
+        semaforo_usuario->fila_bloqueados = p_prox->fila_semaforo;
+        p_prox->fila_semaforo = NULL;
+        p_prox->estado = ativado;
+    }
+
+    enable();
+}

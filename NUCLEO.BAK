@@ -1,0 +1,217 @@
+#include <system.h>
+
+#define TAMANHO_MAXIMO 35
+#define INTERRUPCAO 8
+
+/* Estrutura para os registradores */
+typedef struct registros
+{
+    unsigned bx1, es1;
+} regis;
+
+/* estrutura de dados no núcleo do sistema operacional que serve para armazenar a informação de um processo (BCP) */
+typedef struct desc_p
+{
+    char nome[TAMANHO_MAXIMO];
+    enum {ativo, bloq_P,terminado} estado;
+    PTR_DESC contexto;
+    struct desc_p *fila_sem; /*fila de proc. bloqueados por semaforo*/
+    struct desc_p *prox_desc;
+} DESCRITOR_PROC;
+
+typedef DESCRITOR_PROC *PTR_DESC_PROC; /* ponteiro para o BCP (alocação dinânmica) */
+
+typedef struct 
+{
+    int s; /*parte inteira*/
+    PTR_DESC_PROC Q;
+} semaforo;
+
+/* Cabeça da fila de processos e contexto do escalador de processos */
+PTR_DESC_PROC prim = NULL;
+PTR_DESC d_esc;
+
+/* Estrutura para a "região crítica" contendo os resultados dos registradores e ponteiro da flag do DOS */
+typedef union k{
+  regis x;
+  char far *y;
+}APONTA_REG_CRIT;
+
+APONTA_REG_CRIT a;
+
+/* Função que desabilita as interrupções e retorna o estado da interrupção para o padrão e no fim retorna o controle para o DOS */
+void far volta_DOS()
+{
+    disable();
+    setvect(INTERRUPCAO, p_est->int_anterior);
+    enable();
+    exit(0);
+}
+
+void far inicia_fila_prontos()
+{
+    prim = NULL;
+}
+
+/* Aloca o BCP do processo e o insere no fim da fila de processos */
+void far cria_processo(void far (*endereco_processo)(), char nome_processo[TAMANHO_MAXIMO])
+{
+
+    PTR_DESC_PROC processo = (PTR_DESC_PROC)malloc(sizeof(struct desc_p));
+    strcpy(processo->nome, nome_processo);
+    processo->estado = ativo;
+    processo->contexto = cria_desc();
+    newprocess(endereco_processo, processo->contexto);
+    processo->prox_desc = NULL;
+
+    if (prim == NULL) /* Se a fila estiver vazia, já o insere no início(cabeça da fila) */
+    {
+        processo->prox_desc = processo;
+        prim = processo;
+    }
+    else /* Caso contrário insere no fim da fila */
+    {
+        PTR_DESC_PROC aux = prim;
+
+        while (aux->prox_desc != prim)
+        {
+            aux = aux->prox_desc;
+        }
+
+        aux->prox_desc = processo;
+        processo->prox_desc = prim;
+    }
+}
+
+/* Função para colocar o processo como estado finalizado("finished") */
+/* Como discutido em aula caso restar tempo na fatia, deve ser gasto usando o while(1) */
+void far termina_processo()
+{
+    disable();
+    prim->estado = terminado; /*????????????????????????????????????????????????????????????????????????*/
+    enable();
+    while (1);
+}
+
+/* Função para percorrer a fila de processos ativos e adquirir o próximo(endereço do descritor) */
+/* Caso não exista processos ativos deve-se retornar NULL */
+PTR_DESC_PROC Procura_prox_ativo()
+{
+    PTR_DESC_PROC proximo = prim->prox_desc;
+    while (proximo != prim)
+    {
+        if (proximo->estado == ativo)
+        {
+            return proximo;
+        }
+        proximo = proximo->prox_desc;
+    }
+    return NULL;
+}
+
+/* Escalador, onde que indica a origem(context) e indica o destino(próximo processo) */
+void far escalador()
+{
+    p_est->p_origem = d_esc;
+    p_est->p_destino = prim->contexto;
+    p_est->num_vetor = INTERRUPCAO;
+
+    _AH = 0x34; /* AH com a flag da pilha de serviços do DOS */
+    _AL = 0x00;
+
+    geninterrupt(0x21); /* Inicia uma interrupção ao endereço */
+
+    /* Salva os valores nos registradores da região crítica */
+    a.x.bx1 = _BX;
+    a.x.es1 = _ES;
+
+    /* Realiza a mudança de processos */
+    while (1)
+    {
+        iotransfer();
+        disable();
+
+        if (!(*a.y))
+        {
+            if ((prim = Procura_prox_ativo()) == NULL)
+            {
+                volta_DOS();
+            }
+
+            p_est->p_destino = prim->contexto;
+        }
+
+        enable();
+    }
+}
+
+/* Cria os descritores e transfere o controle atual para o escalador de processos(scheduler) */
+/* Função dispara_sistema, do slides */
+void far dispara_sistema()
+{
+    PTR_DESC desc_dispara;
+    d_esc = cria_desc();
+    desc_dispara = cria_desc();
+    newprocess(escalador, d_esc);
+    transfer(desc_dispara, d_esc);
+}
+
+/* Primitiva para a inicializacao do semaforo*/
+void far inicia_semaforo(semaforo *sem, int n) 
+{
+    sem->s = n;
+    sem->Q = NULL;
+}
+
+void far P(semaforo *sem)
+{
+    disable(); /*Desabilita interrupcoes: P deve ser indivisivel*/
+
+    if(sem->s > 0) 
+    {
+        sem->s--;
+        enable();
+    }
+    else {
+        PTR_DESC_PROC aux;
+
+        prim->estado = bloq_P;
+
+        if(sem->Q == NULL) 
+            sem->Q = prim;
+        else {
+            aux = sem->Q;
+
+            while(aux->fila_sem != NULL)
+                aux = aux->fila_sem;
+
+            aux->fila_sem = prim;    
+        }    
+
+        prim->fila_sem = NULL;
+
+        aux = prim;
+
+        if((prim = Procura_prox_ativo()) == NULL) volta_DOS();
+
+        transfer(aux->contexto, prim->contexto);
+    }
+
+    enable();
+}
+
+void far V(semaforo *sem) 
+{
+    disable();
+
+    if(sem->Q == NULL) sem->s++;
+    else {
+        PTR_DESC_PROC aux = sem->Q;
+
+        sem->Q = p_prox->fila_sem;
+        p_prox->fila_sem = NULL;
+        p_prox->estado = ativo;
+    }
+
+    enable();
+}
